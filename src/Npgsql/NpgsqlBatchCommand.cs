@@ -130,18 +130,18 @@ public sealed class NpgsqlBatchCommand : DbBatchCommand
     /// backing <see cref="NpgsqlCommand.Parameters" /> (in non-batching) mode. If the user provided named parameters, this is a
     /// separate list containing the re-ordered parameters.
     /// </remarks>
-    internal List<NpgsqlParameter> PositionalParameters
+    internal IList<NpgsqlParameter> PositionalParameters
     {
-        get => _inputParameters ??= _ownedInputParameters ??= [];
+        get => _inputParameters ??= _ownedInputParameters ??= new List<NpgsqlParameter>();
         set => _inputParameters = value;
     }
 
     internal bool HasParameters => _inputParameters?.Count > 0 || _ownedInputParameters?.Count > 0;
 
-    internal List<NpgsqlParameter> CurrentParametersReadOnly => HasParameters ? PositionalParameters : EmptyParameters;
+    internal IList<NpgsqlParameter> CurrentParametersReadOnly => HasParameters ? PositionalParameters : EmptyParameters;
 
-    List<NpgsqlParameter>? _ownedInputParameters;
-    List<NpgsqlParameter>? _inputParameters;
+    IList<NpgsqlParameter>? _ownedInputParameters;
+    IList<NpgsqlParameter>? _inputParameters;
 
     /// <summary>
     /// The RowDescription message for this query. If null, the query does not return rows (e.g. INSERT)

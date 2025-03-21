@@ -105,7 +105,7 @@ partial class NpgsqlConnector
         }
     }
 
-    internal async Task WriteParse(string sql, byte[] asciiName, List<NpgsqlParameter> inputParameters, bool async, CancellationToken cancellationToken = default)
+    internal async Task WriteParse(string sql, byte[] asciiName, IList<NpgsqlParameter> inputParameters, bool async, CancellationToken cancellationToken = default)
     {
         NpgsqlWriteBuffer.AssertASCIIOnly(asciiName);
 
@@ -157,7 +157,7 @@ partial class NpgsqlConnector
     }
 
     internal async Task WriteBind(
-        List<NpgsqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         string portal,
         byte[] asciiName,
         bool allResultTypesAreUnknown,

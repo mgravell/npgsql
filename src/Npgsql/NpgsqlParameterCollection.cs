@@ -1,3 +1,5 @@
+using Npgsql.Internal;
+using NpgsqlTypes;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -5,8 +7,9 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using Npgsql.Internal;
-using NpgsqlTypes;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Npgsql;
 
@@ -18,7 +21,42 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
 {
     internal const int LookupThreshold = 5;
 
-    internal List<NpgsqlParameter> InternalList { get; } = new(5);
+    private object? paramOrParams; // could be null, a single NpgsqlParameter, or a rented+oversized NpgsqlParameter[]
+    private int paramCount; // always usable; in the case of an array, this is limit of the well-defined values
+
+    internal NpgsqlParameter SingleParamPreChecked
+    {
+        get
+        {
+            Debug.Assert(paramCount == 1, $"{nameof(Count)} must be pre-checked as 1 before accessing {nameof(SingleParamPreChecked)}");
+            return paramOrParams as NpgsqlParameter ?? ((NpgsqlParameter[])paramOrParams!)[0];
+        }
+    }
+
+    internal ReadOnlySpan<NpgsqlParameter> MultiParamsPreChecked
+    {
+        get
+        {
+            Debug.Assert(paramCount > 1, $"{nameof(Count)} must be pre-checked as > 1 before accessing {nameof(MultiParamsPreChecked)}");
+            return new((NpgsqlParameter[])paramOrParams!, 0, paramCount);
+        }
+    }
+
+    // convenience API that allows single and muilti params to be accessed in the same way; "single" should be a placeholder local,
+    // used to generate a transient unit-length span
+    internal ReadOnlySpan<NpgsqlParameter> GetParamsSpan(ref NpgsqlParameter? single)
+    {
+        switch (paramCount)
+        {
+        case 0: return default;
+        case 1 when paramOrParams is NpgsqlParameter p:
+            single = p;
+            return new(ref single);
+        default: // includes single case when object is an array (added multiple, then removed back down to one)
+            return new((NpgsqlParameter[])paramOrParams!, 0, paramCount);
+        }
+    }
+
 #if DEBUG
     internal static bool TwoPassCompatMode;
 #else
@@ -38,7 +76,7 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// </summary>
     internal NpgsqlParameterCollection() { }
 
-    bool LookupEnabled => InternalList.Count >= LookupThreshold;
+    bool LookupEnabled => paramCount >= LookupThreshold;
 
     void LookupClear()
     {
@@ -62,12 +100,15 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
         if (_caseInsensitiveLookup is null)
             return;
 
+        NpgsqlParameter? single = null;
+        var args = GetParamsSpan(ref single);
+
         if (TwoPassCompatMode &&
             (!_caseSensitiveLookup!.TryGetValue(name, out var indexCs) || index < indexCs))
         {
-            for (var i = index + 1; i < InternalList.Count; i++)
+            for (var i = index + 1; i < args.Length; i++)
             {
-                var parameterName = InternalList[i].TrimmedName;
+                var parameterName = args[i].TrimmedName;
                 if (_caseSensitiveLookup.TryGetValue(parameterName, out var currentI) && currentI + 1 == i)
                     _caseSensitiveLookup[parameterName] = i;
             }
@@ -77,9 +118,9 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
 
         if (!_caseInsensitiveLookup.TryGetValue(name, out var indexCi) || index < indexCi)
         {
-            for (var i = index + 1; i < InternalList.Count; i++)
+            for (var i = index + 1; i < args.Length; i++)
             {
-                var parameterName = InternalList[i].TrimmedName;
+                var parameterName = args[i].TrimmedName;
                 if (_caseInsensitiveLookup.TryGetValue(parameterName, out var currentI) && currentI + 1 == i)
                     _caseInsensitiveLookup[parameterName] = i;
             }
@@ -93,11 +134,14 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
         if (_caseInsensitiveLookup is null)
             return;
 
+        NpgsqlParameter? single = null;
+        var args = GetParamsSpan(ref single);
+
         if (TwoPassCompatMode && _caseSensitiveLookup!.Remove(name))
         {
-            for (var i = index; i < InternalList.Count; i++)
+            for (var i = index; i < args.Length; i++)
             {
-                var parameterName = InternalList[i].TrimmedName;
+                var parameterName = args[i].TrimmedName;
                 if (_caseSensitiveLookup.TryGetValue(parameterName, out var currentI) && currentI - 1 == i)
                     _caseSensitiveLookup[parameterName] = i;
             }
@@ -105,17 +149,17 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
 
         if (_caseInsensitiveLookup.Remove(name))
         {
-            for (var i = index; i < InternalList.Count; i++)
+            for (var i = index; i < args.Length; i++)
             {
-                var parameterName = InternalList[i].TrimmedName;
+                var parameterName = args[i].TrimmedName;
                 if (_caseInsensitiveLookup.TryGetValue(parameterName, out var currentI) && currentI - 1 == i)
                     _caseInsensitiveLookup[parameterName] = i;
             }
 
             // Fix-up the case-insensitive lookup to point to the next match, if any.
-            for (var i = 0; i < InternalList.Count; i++)
+            for (var i = 0; i < args.Length; i++)
             {
-                var value = InternalList[i];
+                var value = args[i];
                 if (string.Equals(name, value.TrimmedName, StringComparison.OrdinalIgnoreCase))
                 {
                     _caseInsensitiveLookup[value.TrimmedName] = i;
@@ -172,7 +216,7 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
             if (index == -1)
                 ThrowHelper.ThrowArgumentException("Parameter not found");
 
-            return InternalList[index];
+            return paramCount == 1 ? SingleParamPreChecked : MultiParamsPreChecked[index];
         }
         set
         {
@@ -186,10 +230,23 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
             if (!string.Equals(parameterName, value.TrimmedName, StringComparison.OrdinalIgnoreCase))
                 ThrowHelper.ThrowArgumentException("Parameter name must be a case-insensitive match with the property 'ParameterName' on the given NpgsqlParameter", nameof(parameterName));
 
-            var oldValue = InternalList[index];
+            ref NpgsqlParameter argAddr = ref GetParameterRef(index);
+            var oldValue = argAddr;
             LookupChangeName(value, oldValue.ParameterName, oldValue.TrimmedName, index);
 
-            InternalList[index] = value;
+            argAddr = value;
+        }
+    }
+
+    private ref NpgsqlParameter GetParameterRef(int index)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(index, paramCount);
+        switch (paramOrParams)
+        {
+        case NpgsqlParameter[] multiple:
+            return ref multiple[index];
+        default:
+            return ref Unsafe.As<object?, NpgsqlParameter>(ref paramOrParams);
         }
     }
 
@@ -200,21 +257,22 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// <value>The <see cref="NpgsqlParameter"/> at the specified index.</value>
     public new NpgsqlParameter this[int index]
     {
-        get => InternalList[index];
+        get => GetParameterRef(index);
         set
         {
             ArgumentNullException.ThrowIfNull(value);
             if (value.Collection is not null)
                 ThrowHelper.ThrowInvalidOperationException("The parameter already belongs to a collection");
 
-            var oldValue = InternalList[index];
+            ref NpgsqlParameter argAddr = ref GetParameterRef(index);
+            var oldValue = argAddr;
 
             if (ReferenceEquals(oldValue, value))
                 return;
 
             LookupChangeName(value, oldValue.ParameterName, oldValue.TrimmedName, index);
 
-            InternalList[index] = value;
+            argAddr = value;
             value.Collection = this;
             oldValue.Collection = null;
         }
@@ -227,14 +285,9 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// <returns>The parameter that was added.</returns>
     public NpgsqlParameter Add(NpgsqlParameter value)
     {
-        ArgumentNullException.ThrowIfNull(value);
-        if (value.Collection is not null)
-            ThrowHelper.ThrowInvalidOperationException("The parameter already belongs to a collection");
-
-        InternalList.Add(value);
-        value.Collection = this;
+        InsertCore(paramCount, value);
         if (!value.IsPositional)
-            LookupAdd(value.TrimmedName, InternalList.Count - 1);
+            LookupAdd(value.TrimmedName, paramCount - 1);
         return value;
     }
 
@@ -376,20 +429,22 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
         }
 
         // Start with case-sensitive search in two pass mode.
+        NpgsqlParameter? single = null;
+        var span = GetParamsSpan(ref single);
         if (TwoPassCompatMode)
         {
-            for (var i = 0; i < InternalList.Count; i++)
+            for (var i = 0; i < span.Length; i++)
             {
-                var name = InternalList[i].TrimmedName;
+                var name = span[i].TrimmedName;
                 if (string.Equals(parameterName, name))
                     return i;
             }
         }
 
         // Then do case-insensitive search.
-        for (var i = 0; i < InternalList.Count; i++)
+        for (var i = 0; i < span.Length; i++)
         {
-            var name = InternalList[i].TrimmedName;
+            var name = span[i].TrimmedName;
             if (ReferenceEquals(parameterName, name) || string.Equals(parameterName, name, StringComparison.OrdinalIgnoreCase))
                 return i;
         }
@@ -399,13 +454,15 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
         void BuildLookup()
         {
             if (TwoPassCompatMode)
-                _caseSensitiveLookup = new Dictionary<string, int>(InternalList.Count);
+                _caseSensitiveLookup = new Dictionary<string, int>(paramCount);
 
-            _caseInsensitiveLookup = new Dictionary<string, int>(InternalList.Count, StringComparer.OrdinalIgnoreCase);
+            _caseInsensitiveLookup = new Dictionary<string, int>(paramCount, StringComparer.OrdinalIgnoreCase);
 
-            for (var i = 0; i < InternalList.Count; i++)
+            NpgsqlParameter? single = null;
+            var span = GetParamsSpan(ref single);
+            for (var i = 0; i < span.Length; i++)
             {
-                var item = InternalList[i];
+                var item = span[i];
                 if (!item.IsPositional)
                     LookupAdd(item.TrimmedName, i);
             }
@@ -425,9 +482,7 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// <param name="index">The zero-based index of the parameter.</param>
     public override void RemoveAt(int index)
     {
-        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, InternalList.Count);
-
-        Remove(InternalList[index]);
+        Remove(GetParameterRef(index));
     }
 
     /// <inheritdoc />
@@ -458,7 +513,7 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
 
     /// <inheritdoc />
     public override bool Contains(object value)
-        => value is NpgsqlParameter param && InternalList.Contains(param);
+        => value is NpgsqlParameter param && Contains(param);
 
     /// <summary>
     /// Gets a value indicating whether a <see cref="NpgsqlParameter"/> with the specified parameter name exists in the collection.
@@ -480,7 +535,7 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
 
         if (index != -1)
         {
-            parameter = InternalList[index];
+            parameter = GetParameterRef(index);
             return true;
         }
 
@@ -494,10 +549,20 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     public override void Clear()
     {
         // clean up parameters so they can be added to another command if required.
-        foreach (var toRemove in InternalList)
+        NpgsqlParameter? single = null;
+        foreach (var toRemove in GetParamsSpan(ref single))
             toRemove.Collection = null;
 
-        InternalList.Clear();
+        if (paramOrParams is NpgsqlParameter[] multi)
+        {
+            multi.AsSpan(0, paramCount).Clear();
+        }
+        else
+        {
+            paramCount = 0;
+        }
+        paramCount = 0;
+
         LookupClear();
     }
 
@@ -520,33 +585,79 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     #region ICollection Member
 
     /// <inheritdoc />
-    public override bool IsSynchronized => (InternalList as ICollection).IsSynchronized;
+    public override bool IsSynchronized => false;
 
     /// <summary>
     /// Gets the number of <see cref="NpgsqlParameter"/> objects in the collection.
     /// </summary>
     /// <value>The number of <see cref="NpgsqlParameter"/> objects in the collection.</value>
-    public override int Count => InternalList.Count;
+    public override int Count => paramCount;
 
     /// <inheritdoc />
     public override void CopyTo(Array array, int index)
-        => ((ICollection)InternalList).CopyTo(array, index);
+    {
+        switch (paramCount)
+        {
+        case 0:
+            break;
+        case 1:
+            array.SetValue(SingleParamPreChecked, index);
+            break;
+        default:
+            if (array is NpgsqlParameter[] typed)
+            {
+                MultiParamsPreChecked.CopyTo(typed.AsSpan(index));
+            }
+            else
+            {
+                ((NpgsqlParameter[])paramOrParams!).CopyTo(array, index);
+            }
+            break;
+        }
+    }
+        //=> ((ICollection)InternalList).CopyTo(array, index);
 
     /// <inheritdoc />
     bool ICollection<NpgsqlParameter>.IsReadOnly => false;
 
     /// <inheritdoc />
-    public override object SyncRoot => ((ICollection)InternalList).SyncRoot;
+    public override object SyncRoot => this;
 
     #endregion
 
     #region IEnumerable Member
 
-    IEnumerator<NpgsqlParameter> IEnumerable<NpgsqlParameter>.GetEnumerator()
-        => InternalList.GetEnumerator();
+    IEnumerator<NpgsqlParameter> IEnumerable<NpgsqlParameter>.GetEnumerator() => new Enumerator(this);
 
     /// <inheritdoc />
-    public override IEnumerator GetEnumerator() => InternalList.GetEnumerator();
+    public override IEnumerator GetEnumerator() => new Enumerator(this);
+
+    private class Enumerator(NpgsqlParameterCollection source) : IEnumerator<NpgsqlParameter>, IEnumerator
+    {
+        private int index = -1;
+
+        object IEnumerator.Current => Current;
+
+        public NpgsqlParameter Current => source.GetParameterRef(++index);
+
+        void IDisposable.Dispose()
+            => index = int.MaxValue;
+
+        bool IEnumerator.MoveNext()
+        {
+            if (index + 1 < source.Count)
+            {
+                index++;
+                return true;
+            }
+            return false;
+        }
+
+        void IEnumerator.Reset()
+        {
+            index = -1;
+        }
+    }
 
     #endregion
 
@@ -555,8 +666,16 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     {
         ArgumentNullException.ThrowIfNull(values);
 
+        EnsureCapacity(Count + values.Length);
         foreach (var parameter in values)
             Add(Cast(parameter));
+    }
+
+    internal void AddRange(ReadOnlySpan<NpgsqlParameter> values)
+    {
+        EnsureCapacity(Count + values.Length);
+        foreach (var parameter in values)
+            Add(parameter);
     }
 
     /// <inheritdoc />
@@ -581,7 +700,25 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// <param name="item">Parameter to find.</param>
     /// <returns>Index of the parameter, or -1 if the parameter is not present.</returns>
     public int IndexOf(NpgsqlParameter item)
-        => InternalList.IndexOf(item);
+    {
+        switch (paramCount)
+        {
+        case 0:
+            return -1;
+        case 1:
+            return ReferenceEquals(item, SingleParamPreChecked) ? 0 : -1;
+        default:
+            var span = MultiParamsPreChecked;
+            for (var i = 0; i < span.Length; i++)
+            {
+                if (ReferenceEquals(span[i], item))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+    }
 
     /// <summary>
     /// Insert the specified parameter into the collection.
@@ -590,14 +727,73 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// <param name="item">Parameter to insert.</param>
     public void Insert(int index, NpgsqlParameter item)
     {
+        InsertCore(index, item);
+
+        if (!item.IsPositional)
+            LookupInsert(item.TrimmedName, index);
+    }
+
+    private void InsertCore(int index, NpgsqlParameter item)
+    {
+        const int DEFAULT_SIZE = 5;
+
         ArgumentNullException.ThrowIfNull(item);
         if (item.Collection != null)
             throw new Exception("The parameter already belongs to a collection");
 
-        InternalList.Insert(index, item);
+        if ((uint)index > (uint)paramCount)
+        {
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(index, paramCount);
+        }
+
+        switch (paramOrParams)
+        {
+        case null:
+            paramOrParams = item;
+            break;
+        case NpgsqlParameter single:
+            var newArray = new NpgsqlParameter[DEFAULT_SIZE];
+            newArray[0] = index == 0 ? item : single;
+            newArray[1] = index == 0 ? single : item;
+            paramOrParams = newArray;
+            break;
+        case NpgsqlParameter[] multiple:
+            if (paramCount == multiple.Length)
+            {
+                GrowForInsertion(ref multiple, index);
+                paramOrParams = multiple;
+            }
+            else if (index < paramCount)
+            {
+                Array.Copy(multiple, index, multiple, index + 1, paramCount - index);
+            }
+            multiple[index] = item;
+            break;
+        }
+        paramCount++;
         item.Collection = this;
-        if (!item.IsPositional)
-            LookupInsert(item.TrimmedName, index);
+
+        static void GrowForInsertion(ref NpgsqlParameter[] array, int indexToInsert)
+        {
+            // growth logic based on List<T>
+            var requiredCapacity = checked(array.Length + 1);
+            var newCapacity = array.Length == 0 ? DEFAULT_SIZE : 2 * array.Length;
+            if ((uint)newCapacity > Array.MaxLength) newCapacity = Array.MaxLength;
+            if (newCapacity < requiredCapacity) newCapacity = requiredCapacity;
+
+            var newItems = new NpgsqlParameter[newCapacity];
+            if (indexToInsert != 0)
+            {
+                Array.Copy(array, newItems, length: indexToInsert);
+            }
+
+            if (array.Length != indexToInsert)
+            {
+                Array.Copy(array, indexToInsert, newItems, indexToInsert + 1, array.Length - indexToInsert);
+            }
+
+            array = newItems;
+        }
     }
 
     /// <summary>
@@ -605,7 +801,24 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// </summary>
     /// <param name="item">Parameter to find.</param>
     /// <returns>True if the parameter was found, otherwise false.</returns>
-    public bool Contains(NpgsqlParameter item) => InternalList.Contains(item);
+    public bool Contains(NpgsqlParameter item)
+    {
+
+        switch (paramCount)
+        {
+        case 0: return false;
+        case 1: return ReferenceEquals(SingleParamPreChecked, item);
+        default:
+            foreach (var p in MultiParamsPreChecked)
+            {
+                if (ReferenceEquals(p, item))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
 
     /// <summary>
     /// Remove the specified parameter from the collection.
@@ -621,7 +834,20 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
         var index = IndexOf(item);
         if (index >= 0)
         {
-            InternalList.RemoveAt(index);
+            paramCount--; // note that this decrement *before* the array-packing step is important
+            switch (paramOrParams)
+            {
+            case NpgsqlParameter: // single
+                paramOrParams = null;
+                break;
+            case NpgsqlParameter[] multiple:
+                if (index < paramCount)
+                {
+                    Array.Copy(multiple, index + 1, multiple, index, paramCount - index);
+                }
+                multiple[paramCount] = null!; // release final for GC
+                break;
+            }
             if (!LookupEnabled)
                 LookupClear();
             if (!item.IsPositional)
@@ -639,24 +865,76 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
     /// <param name="array">Destination array.</param>
     /// <param name="arrayIndex">Starting index in destination array.</param>
     public void CopyTo(NpgsqlParameter[] array, int arrayIndex)
-        => InternalList.CopyTo(array, arrayIndex);
+    {
+        switch (paramCount)
+        {
+        case 0:
+            break;
+        case 1:
+            array[arrayIndex] = SingleParamPreChecked;
+            break;
+        default:
+            MultiParamsPreChecked.CopyTo(array.AsSpan(arrayIndex));
+            break;
+        }
+    }
 
     /// <summary>
     /// Convert collection to a System.Array.
     /// </summary>
     /// <returns>NpgsqlParameter[]</returns>
-    public NpgsqlParameter[] ToArray() => InternalList.ToArray();
+    public NpgsqlParameter[] ToArray() => paramCount switch
+    {
+        0 => [],
+        1 => [SingleParamPreChecked],
+        _ => MultiParamsPreChecked.ToArray(),
+    };
 
     internal void CloneTo(NpgsqlParameterCollection other)
     {
-        other.InternalList.Clear();
-        foreach (var param in InternalList)
+        if (other.paramCount != 0)
         {
-            var newParam = param.Clone();
-            newParam.Collection = this;
-            other.InternalList.Add(newParam);
+            // clear any existing args data (to ensure they can be collected, although note that we onl
+            var otherArgsArray = other.paramOrParams as NpgsqlParameter[];
+            if (otherArgsArray is null)
+            {
+                // then at most one arg; we can just wipe it
+                other.paramOrParams = null;
+            }
+            else
+            {
+                // we have an array; wipe the in-use portion, but retain the array
+                otherArgsArray.AsSpan(0, other.paramCount).Clear();
+            }
         }
 
+        other.paramCount = paramCount;
+
+        // copy the parameter data
+        switch (paramCount)
+        {
+        case 0: // nothing to do
+            break;
+        case 1 when (other.paramOrParams is NpgsqlParameter[] otherArgsArray):
+            // push into the array (we never use zero-length arrays here)
+            otherArgsArray[0] = SingleParamPreChecked.Clone(other);
+            break;
+        case 1:
+            // store directly
+            other.paramOrParams = SingleParamPreChecked.Clone(other);
+            break;
+        default:
+            other.EnsureCapacity(paramCount);
+            var target = (NpgsqlParameter[])other.paramOrParams!;
+            var index = 0;
+            foreach (var source in MultiParamsPreChecked)
+            {
+                target[index++] = source.Clone(other);
+            }
+            break;
+        }
+
+        // initialize lookups
         if (LookupEnabled && _caseInsensitiveLookup is not null)
         {
             other._caseInsensitiveLookup = new Dictionary<string, int>(_caseInsensitiveLookup, StringComparer.OrdinalIgnoreCase);
@@ -668,16 +946,41 @@ public sealed class NpgsqlParameterCollection : DbParameterCollection, IList<Npg
         }
     }
 
+    internal void EnsureCapacity(int capacity)
+    {
+        if (capacity <= 1)
+        {
+            return; // no need to do anything
+        }
+
+        switch (paramOrParams)
+        {
+        case null: // nothing at the moment
+            var newArray = new NpgsqlParameter[capacity];
+            paramOrParams = newArray;
+            break;
+        case NpgsqlParameter single:
+            newArray = new NpgsqlParameter[capacity];
+            newArray[0] = single;
+            paramOrParams = newArray;
+            break;
+        case NpgsqlParameter[] multiple when (multiple.Length < capacity):
+            // need to expand an existing array
+            newArray = new NpgsqlParameter[capacity];
+            multiple.AsSpan(0, paramCount).CopyTo(newArray);
+            paramOrParams = newArray;
+            break;
+        }
+    }
+
     internal void ProcessParameters(PgSerializerOptions options, bool validateValues, CommandType commandType)
     {
         HasOutputParameters = false;
         PlaceholderType = PlaceholderType.NoParameters;
 
-        var list = InternalList;
-        for (var i = 0; i < list.Count; i++)
+        NpgsqlParameter? single = null;
+        foreach (var p in GetParamsSpan(ref single))
         {
-            var p = list[i];
-
             switch (PlaceholderType)
             {
             case PlaceholderType.NoParameters:

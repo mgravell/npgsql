@@ -798,9 +798,11 @@ public class NpgsqlParameter : DbParameter, IDbDataParameter, ICloneable
     /// Creates a new <see cref="NpgsqlParameter"/> that is a copy of the current instance.
     /// </summary>
     /// <returns>A new <see cref="NpgsqlParameter"/> that is a copy of this instance.</returns>
-    public NpgsqlParameter Clone() => CloneCore();
+    public NpgsqlParameter Clone() => CloneCore(null);
 
-    private protected virtual NpgsqlParameter CloneCore() =>
+    internal NpgsqlParameter Clone(NpgsqlParameterCollection? collection) => CloneCore(collection);
+
+    private protected virtual NpgsqlParameter CloneCore(NpgsqlParameterCollection? collection) =>
         // use fields instead of properties
         // to avoid auto-initializing something like type_info
         new()
@@ -818,6 +820,7 @@ public class NpgsqlParameter : DbParameter, IDbDataParameter, ICloneable
             SourceVersion = SourceVersion,
             _value = _value,
             SourceColumnNullMapping = SourceColumnNullMapping,
+            Collection = collection,
         };
 
     object ICloneable.Clone() => Clone();

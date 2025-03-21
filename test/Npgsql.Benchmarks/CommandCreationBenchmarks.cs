@@ -14,11 +14,18 @@ public class CommandCreationBenchmarks
     [Params(0,1,5,10,20)]
     public int ParameterCount { get; set; }
 
+    [Params(true, false)]
+    public bool EnsureCapacity { get; set; }
+
     [Benchmark]
     public void CreateCommand()
     {
         using var cmd = new NpgsqlCommand("""select * from orders""");
         var paramCount = ParameterCount;
+        if (EnsureCapacity)
+        {
+            cmd.Parameters.EnsureCapacity(paramCount);
+        }
         for (var i = 0; i < paramCount; i++)
         {
             cmd.Parameters.Add(new NpgsqlParameter<int> { TypedValue = i });

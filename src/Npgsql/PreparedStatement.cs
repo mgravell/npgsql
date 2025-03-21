@@ -57,7 +57,7 @@ sealed class PreparedStatement
         PreparedStatementManager manager,
         string sql,
         string name,
-        List<NpgsqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         PreparedStatement? statementBeingReplaced)
     {
         var pStatement = new PreparedStatement(manager, sql, true)
@@ -80,7 +80,7 @@ sealed class PreparedStatement
         State = PreparedState.NotPrepared;
     }
 
-    internal void SetParamTypes(List<NpgsqlParameter> parameters)
+    internal void SetParamTypes(IList<NpgsqlParameter> parameters)
     {
         if (parameters.Count == 0)
         {
@@ -93,7 +93,7 @@ sealed class PreparedStatement
             ConverterParamTypes[i] = parameters[i].PgTypeId;
     }
 
-    internal bool DoParametersMatch(List<NpgsqlParameter> parameters)
+    internal bool DoParametersMatch(IList<NpgsqlParameter> parameters)
     {
         var paramTypes = ConverterParamTypes!;
         if (paramTypes.Length != parameters.Count)

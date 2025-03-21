@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql.Internal;
 using Npgsql.Properties;
 using System.Collections;
+using System.Runtime.InteropServices;
 
 namespace Npgsql;
 
@@ -896,7 +897,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                     batchCommand.FinalCommandText = CommandText;
                     if (parameters is not null)
                     {
-                        batchCommand.PositionalParameters = parameters.InternalList;
+                        batchCommand.PositionalParameters = parameters;
                         batchCommand._parameters = parameters;
                     }
                 }
@@ -904,7 +905,7 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
                 {
                     batchCommand.FinalCommandText = batchCommand.CommandText;
                     if (parameters is not null)
-                        batchCommand.PositionalParameters = parameters.InternalList;
+                        batchCommand.PositionalParameters = parameters;
                 }
 
                 ValidateParameterCount(batchCommand);
@@ -1015,7 +1016,26 @@ GROUP BY pg_proc.proargnames, pg_proc.proargtypes, pg_proc.proallargtypes, pg_pr
             batchCommand ??= TruncateStatementsToOne();
             batchCommand.FinalCommandText = sqlBuilder.ToString();
             batchCommand._parameters = parameters;
-            batchCommand.PositionalParameters.AddRange(inputParameters);
+            if (inputParameters is { Count:>0})
+            {
+                var target = batchCommand.PositionalParameters;
+                if (target is List<NpgsqlParameter> list)
+                {
+                    list.AddRange(inputParameters);
+                }
+                else if (target is NpgsqlParameterCollection col)
+                {
+                    col.AddRange(CollectionsMarshal.AsSpan(inputParameters));
+                }
+                else
+                {
+                    foreach (var arg in inputParameters)
+                    {
+                        target.Add(arg);
+                    }
+                }
+                    
+            }
             ValidateParameterCount(batchCommand);
 
             break;

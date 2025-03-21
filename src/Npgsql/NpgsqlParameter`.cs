@@ -127,7 +127,7 @@ public sealed class NpgsqlParameter<T> : NpgsqlParameter
         return new();
     }
 
-    private protected override NpgsqlParameter CloneCore() =>
+    private protected override NpgsqlParameter CloneCore(NpgsqlParameterCollection? collection) =>
         // use fields instead of properties
         // to avoid auto-initializing something like type_info
         new NpgsqlParameter<T>
@@ -145,5 +145,6 @@ public sealed class NpgsqlParameter<T> : NpgsqlParameter
             SourceVersion = SourceVersion,
             TypedValue = TypedValue,
             SourceColumnNullMapping = SourceColumnNullMapping,
+            Collection = collection,
         };
 }
